@@ -8,14 +8,14 @@ describe: 即时消息
 import json
 import os
 import requests
-from czsc.fsa.base import FeishuApiBase, request, MultipartEncoder
+from czsc.fsa.base import FeishuApiBase, request
 
 
 class IM(FeishuApiBase):
     """即时消息发送"""
 
-    def __init__(self, app_id, app_secret):
-        super().__init__(app_id, app_secret)
+    def __init__(self, app_id, app_secret, **kwargs):
+        super().__init__(app_id, app_secret, **kwargs)
 
     def get_user_id(self, payload, user_id_type="open_id"):
         """获取用户ID
@@ -46,6 +46,7 @@ class IM(FeishuApiBase):
             stream：上传stream格式文件。若上传文件不属于以上类型，可以使用stream格式
         :return: file_key
         """
+        from requests_toolbelt import MultipartEncoder
         url = "https://open.feishu.cn/open-apis/im/v1/files"
         form = {"file_name": os.path.basename(file_path), "file_type": file_type, "file": (open(file_path, "rb"))}
         multi_form = MultipartEncoder(form)
@@ -65,6 +66,7 @@ class IM(FeishuApiBase):
             avatar：用于设置头像
         :return: image_key
         """
+        from requests_toolbelt import MultipartEncoder
         url = "https://open.feishu.cn/open-apis/im/v1/images"
         form = {"image_type": image_type, "image": (open(image_path, "rb"))}
         multi_form = MultipartEncoder(form)

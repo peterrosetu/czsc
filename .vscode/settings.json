@@ -17,5 +17,9 @@
         "120"
     ],
     "typescript.locale": "zh-CN",
-    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.typeCheckingMode": "off",
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.diagnosticMode": "off",
+    "pyright.disableLanguageServices": true,
+    "python.defaultInterpreterPath": "./venv/bin/python"
 }

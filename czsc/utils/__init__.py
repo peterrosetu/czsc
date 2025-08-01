@@ -1,40 +1,40 @@
 # coding: utf-8
 import os
+import functools
+import threading
+import pandas as pd
 from typing import List, Union
+from loguru import logger
 
 from . import qywx
 from . import ta
 from . import io
 from . import echarts_plot
 
-from .echarts_plot import kline_pro, heat_map
-from .word_writer import WordWriter
+from .echarts_plot import kline_pro, trading_view_kline
 from .corr import nmi_matrix, single_linear, cross_sectional_ic
 from .bar_generator import BarGenerator, freq_end_time, resample_bars, format_standard_kline
 from .bar_generator import is_trading_time, get_intraday_times, check_freq_and_market
 from .io import dill_dump, dill_load, read_json, save_json
-from .sig import check_pressure_support, check_gap_info, is_bis_down, is_bis_up, get_sub_elements, is_symmetry_zs
+from .sig import check_gap_info, is_bis_down, is_bis_up, get_sub_elements, is_symmetry_zs
 from .sig import same_dir_counts, fast_slow_cross, count_last_same, create_single_signal
 from .plotly_plot import KlineChart
-from .trade import cal_trade_price, update_nxb, update_bbars, update_tbars, risk_free_returns, resample_to_daily
-from .cross import CrossSectionalPerformance, cross_sectional_ranker
+from .trade import update_nxb, update_bbars, update_tbars, risk_free_returns, resample_to_daily
+from .cross import cross_sectional_ranker
 from .stats import (
     daily_performance,
-    net_value_stats,
     subtract_fee,
-    weekly_performance,
     holds_performance,
     top_drawdowns,
     rolling_daily_performance,
     psi,
 )
-from .signal_analyzer import SignalAnalyzer, SignalPerformance
-from .cache import home_path, get_dir_size, empty_cache_path, DiskCache, disk_cache, clear_cache
+from .cache import home_path, get_dir_size, empty_cache_path, DiskCache, disk_cache, clear_cache, clear_expired_cache
 from .index_composition import index_composition
 from .data_client import DataClient, set_url_token, get_url_token
 from .oss import AliyunOSS
-from .optuna import optuna_study, optuna_good_params
 from .events import overlap
+from .fernet import generate_fernet_key, fernet_encrypt, fernet_decrypt
 
 
 sorted_freqs = [
@@ -88,6 +88,20 @@ def get_py_namespace(file_py: str, keys: list = []) -> dict:
     text = open(file_py, "r", encoding="utf-8").read()
     code = compile(text, file_py, "exec")
     namespace = {"file_py": file_py, "file_name": os.path.basename(file_py).split(".")[0]}
+    exec(code, namespace)
+    if keys:
+        namespace = {k: v for k, v in namespace.items() if k in keys}
+    return namespace
+
+
+def code_namespace(code: str, keys: list = []) -> dict:
+    """获取 python 代码中的 namespace
+
+    :param code: python 代码
+    :param keys: 指定需要的对象名称
+    :return: namespace
+    """
+    namespace = {"code": code}
     exec(code, namespace)
     if keys:
         namespace = {k: v for k, v in namespace.items() if k in keys}
@@ -181,3 +195,68 @@ def print_df_sample(df, n=5):
     from tabulate import tabulate
 
     print(tabulate(df.head(n).values, headers=df.columns, tablefmt="rst"))
+
+
+def mac_address():
+    """获取本机 MAC 地址
+
+    MAC地址（英语：Media Access Control Address），直译为媒体访问控制地址，也称为局域网地址（LAN Address），
+    以太网地址（Ethernet Address）或物理地址（Physical Address），它是一个用来确认网络设备位置的地址。在OSI模
+    型中，第三层网络层负责IP地址，第二层数据链接层则负责MAC地址。MAC地址用于在网络中唯一标示一个网卡，一台设备若有一
+    或多个网卡，则每个网卡都需要并会有一个唯一的MAC地址。
+
+    :return: 本机 MAC 地址
+    """
+    import uuid
+
+    x = uuid.UUID(int=uuid.getnode()).hex[-12:].upper()
+    x = "-".join([x[i : i + 2] for i in range(0, 11, 2)])
+    return x
+
+
+def to_arrow(df: pd.DataFrame):
+    """将 pandas.DataFrame 转换为 pyarrow.Table"""
+    import io
+    import pyarrow as pa
+
+    table = pa.Table.from_pandas(df)
+    with io.BytesIO() as sink:
+        with pa.ipc.new_file(sink, table.schema) as writer:
+            writer.write_table(table)
+        return sink.getvalue()
+
+
+def timeout_decorator(timeout):
+    """Timeout decorator using threading
+
+    :param timeout: int, timeout duration in seconds
+    """
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            result = [None]
+            exception = [None]
+
+            def target():
+                try:
+                    result[0] = func(*args, **kwargs)
+                except Exception as e:
+                    exception[0] = e
+
+            thread = threading.Thread(target=target)
+            thread.start()
+            thread.join(timeout)
+
+            if thread.is_alive():
+                logger.warning(f"{func.__name__} timed out after {timeout} seconds; args: {args}; kwargs: {kwargs}")
+                return None
+
+            if exception[0]:
+                raise exception[0]
+
+            return result[0]
+
+        return wrapper
+
+    return decorator

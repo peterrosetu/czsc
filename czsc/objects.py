@@ -290,6 +290,14 @@ class BI:
         return sum([x.vol for x in self.bars[1:-1]])
 
     @property
+    def power_snr(self):
+        """SNR 度量力度
+
+        SNR越大，说明内部走势越顺畅，力度也就越大
+        """
+        return round(self.SNR, 4)
+
+    @property
     def change(self):
         """笔的涨跌幅"""
         c = round((self.fx_b.fx - self.fx_a.fx) / self.fx_a.fx, 4)

@@ -169,7 +169,6 @@ def disk_cache(path: Union[AnyStr, Path] = home_path, suffix: str = "pkl", ttl: 
     """
 
     def decorator(func):
-        nonlocal path
         _c = DiskCache(path=Path(path) / func.__name__)
 
         def cached_func(*args, **kwargs):
@@ -193,6 +192,22 @@ def disk_cache(path: Union[AnyStr, Path] = home_path, suffix: str = "pkl", ttl: 
         return cached_func
 
     return decorator
+
+
+def clear_expired_cache(path, max_age: int = 3600 * 24 * 30):
+    """清空过期缓存文件夹
+
+    :param path: 缓存文件夹路径
+    :param max_age: 最大缓存时间，单位：秒
+    """
+    logger.info(f"开始清理缓存文件夹：{path}, max_age={max_age} 秒")
+    path = Path(path)
+    for file in path.glob("*.pkl"):
+        # 使用修改时间而不是创建时间，因为在Windows上创建时间不能轻易修改
+        file_stat = file.stat()
+        if (time.time() - file_stat.st_mtime) > max_age:
+            file.unlink()
+            logger.info(f"已删除过期缓存文件：{file}, 修改时间：{file_stat.st_mtime}，当前时间：{time.time()}")
 
 
 def clear_cache(path: Union[AnyStr, Path] = home_path, subs=None, recreate=False):

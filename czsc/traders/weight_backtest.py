@@ -22,83 +22,6 @@ from czsc.utils.io import save_json
 from czsc.utils.stats import daily_performance, evaluate_pairs
 
 
-@deprecated(version="1.0.0", reason="截面回测已经迁移到 czsc.holds_performance 中")
-def long_short_equity(factors, returns, hold_period=2, rank=5, **kwargs):
-    """根据截面因子值与收益率，回测分析多空对冲组合的收益率
-
-    :param factors: 截面因子，因子值越大，越偏向于做多，因子值越小，越偏向于做空；数据格式如下：
-                        SFIH9001  SFIF9001  SFIC9001
-            dt
-            2022-08-31  1.403915  1.252826  0.968868
-            2022-09-01  1.376690  1.253377  0.972276
-            2022-09-02  1.380867  1.253929  0.974999
-            2022-09-05  1.370359  1.254482  0.977737
-            2022-09-06  0.685180  0.633634  0.493986
-
-    :param returns: 品种收益率矩阵，数据格式如下：
-                        SFIH9001  SFIF9001  SFIC9001
-            dt
-            2021-01-04  0.007803  0.017228  0.004843
-            2021-01-05  0.014068  0.008300  0.000598
-            2021-01-06  0.024520  0.022766  0.004974
-            2021-01-07 -0.006193 -0.003698  0.005951
-            2021-01-08 -0.005651 -0.012263 -0.016441
-
-    :param hold_period: 持仓周期，dt 时刻的数量，如果是 2，则表示每两个交易时刻调仓一次
-    :param rank: 排序因子值前几名，或者排名因子值的前百分之几；
-        如果是整数，则表示排名因子值前几名；如果是浮点数，则表示排名因子值的前百分之几。
-        排名靠前，越偏向于做多；排名靠后，越偏向于做空。
-    :param kwargs:
-    :return:
-    """
-    # 单边费率
-    fee = kwargs.get("fee", 2) / 10000
-    factors, returns = factors.copy(), returns.copy()
-    factors.index = pd.to_datetime(factors.index)
-    returns.index = pd.to_datetime(returns.index)
-
-    # index 对齐
-    factors, returns = factors.align(returns, join="inner")
-    assert len(factors) == len(returns), "factors and cross_ret must have the same length"
-    assert factors.index.equals(returns.index), "factors and cross_ret must have the same index"
-    assert (
-        factors.columns.sort_values().tolist() == returns.columns.sort_values().tolist()
-    ), "factors and cross_ret must have the same columns"
-
-    if isinstance(rank, float):
-        assert 0 < rank < 1, "rank must be between 0 and 1"
-        rank = int(len(factors.columns) * rank)
-
-    # 1. 计算截面品种的多空权重
-    long = (factors.rank(1, ascending=True, method="first") <= rank).iloc[::hold_period].reindex(factors.index).ffill()
-    short = (
-        (factors.rank(1, ascending=False, method="first") <= rank).iloc[::hold_period].reindex(factors.index).ffill()
-    )
-    weight = long + 0 - short
-    assert weight.sum(axis=1).unique().tolist() == [0], "每个时间截面的多空权重之和必须为0"
-
-    # 2. 计算多空组合的收益率
-    long_ret = returns[long].mean(1).cumsum()
-    short_ret = (-returns[short]).mean(1).cumsum()
-    ls_ret = ((returns * weight).sum(axis=1) / (rank * 2)).cumsum()
-    ls_post_fee_ret = (
-        (returns * weight).sum(axis=1) / (rank * 2) - weight.diff().abs().sum(axis=1) / (rank * 4) * fee * 2
-    ).cumsum()
-
-    ret = pd.DataFrame({"多头": long_ret / 2, "空头": short_ret / 2, "多空": ls_ret, "多空费后": ls_post_fee_ret})
-    df_nav = ret.resample("1D").last().dropna(axis=0, thresh=3)
-    df_nav = df_nav.diff()
-
-    # 2. 分品种收益统计
-    ret_symbol = pd.concat([returns[long].sum(), -returns[short].sum()], axis=1)
-    ret_symbol.columns = ["多头", "空头"]
-    ret_symbol["多空"] = ret_symbol["多头"] + ret_symbol["空头"]
-    ret_symbol = ret_symbol.sort_values(by="多空")
-
-    results = {"日收益率": df_nav, "品种收益": ret_symbol, "持仓权重": weight}
-    return results
-
-
 def get_ensemble_weight(trader: CzscTrader, method: Union[AnyStr, Callable] = "mean"):
     """获取 CzscTrader 中所有 positions 按照 method 方法集成之后的权重
 
@@ -231,12 +154,18 @@ class WeightBacktest:
 
     更新日志：
 
-    - V240627: 增加dailys属性，品种每日的交易信息
+    #### 20241125
+
+    1. 新增 yearly_days 参数，用于指定每年的交易日天数，默认为 252。
+
+    #### 20241205
+
+    1. 新增 weight_type 参数，用于指定输入的持仓权重类别，ts 表示 time series，时序策略；。
     """
 
-    version = "V240627"
+    version = "20241205"
 
-    def __init__(self, dfw, digits=2, **kwargs) -> None:
+    def __init__(self, dfw, digits=2, weight_type="ts", **kwargs) -> None:
         """持仓权重回测
 
         初始化函数逻辑：
@@ -269,6 +198,11 @@ class WeightBacktest:
             ===================  ========  ========  =======
 
         :param digits: int, 权重列保留小数位数
+        :param weight_type: str, default 'ts'，持仓权重类别，可选值包括：'ts'、'cs'，分别表示时序策略、截面策略
+
+            ts 表示 time series，时序策略；
+            cs 表示 cross section，截面策略。
+
         :param kwargs:
 
             - fee_rate: float，单边交易成本，包括手续费与冲击成本, 默认为 0.0002
@@ -277,15 +211,18 @@ class WeightBacktest:
         """
         self.kwargs = kwargs
         self.dfw = dfw.copy()
+        self.dfw["dt"] = pd.to_datetime(self.dfw["dt"])
         if self.dfw.isnull().sum().sum() > 0:
             raise ValueError("dfw 中存在空值, 请先处理")
+
         self.digits = digits
+        self.weight_type = weight_type.lower()
         self.fee_rate = kwargs.get("fee_rate", 0.0002)
         self.dfw["weight"] = self.dfw["weight"].astype("float").round(digits)
         self.symbols = list(self.dfw["symbol"].unique().tolist())
-        default_n_jobs = min(cpu_count() // 2, len(self.symbols))
         self._dailys = None
-        self.results = self.backtest(n_jobs=kwargs.get("n_jobs", default_n_jobs))
+        self.yearly_days = kwargs.pop("yearly_days", 252)
+        self.results = self.backtest(n_jobs=kwargs.pop("n_jobs", 1))
 
     @property
     def stats(self):
@@ -332,7 +269,7 @@ class WeightBacktest:
     def alpha_stats(self):
         """策略超额收益统计"""
         df = self.alpha.copy()
-        stats = czsc.daily_performance(df["超额"].to_list())
+        stats = czsc.daily_performance(df["超额"].to_list(), yearly_days=self.yearly_days)
         stats["开始日期"] = df["date"].min().strftime("%Y-%m-%d")
         stats["结束日期"] = df["date"].max().strftime("%Y-%m-%d")
         return stats
@@ -341,7 +278,57 @@ class WeightBacktest:
     def bench_stats(self):
         """基准收益统计"""
         df = self.alpha.copy()
-        stats = czsc.daily_performance(df["基准"].to_list())
+        stats = czsc.daily_performance(df["基准"].to_list(), yearly_days=self.yearly_days)
+        stats["开始日期"] = df["date"].min().strftime("%Y-%m-%d")
+        stats["结束日期"] = df["date"].max().strftime("%Y-%m-%d")
+        return stats
+
+    @property
+    def long_daily_return(self):
+        """多头每日收益率"""
+        df = self.dailys.copy()
+        dfv = pd.pivot_table(df, index="date", columns="symbol", values="long_return").fillna(0)
+
+        if self.weight_type == "ts":
+            dfv["total"] = dfv.mean(axis=1)
+        elif self.weight_type == "cs":
+            dfv["total"] = dfv.sum(axis=1)
+        else:
+            raise ValueError(f"weight_type {self.weight_type} not supported")
+
+        dfv = dfv.reset_index(drop=False)
+        return dfv
+
+    @property
+    def short_daily_return(self):
+        """空头每日收益率"""
+        df = self.dailys.copy()
+        dfv = pd.pivot_table(df, index="date", columns="symbol", values="short_return").fillna(0)
+
+        if self.weight_type == "ts":
+            dfv["total"] = dfv.mean(axis=1)
+        elif self.weight_type == "cs":
+            dfv["total"] = dfv.sum(axis=1)
+        else:
+            raise ValueError(f"weight_type {self.weight_type} not supported")
+
+        dfv = dfv.reset_index(drop=False)
+        return dfv
+
+    @property
+    def long_stats(self):
+        """多头收益统计"""
+        df = self.long_daily_return.copy()
+        stats = czsc.daily_performance(df["total"].to_list(), yearly_days=self.yearly_days)
+        stats["开始日期"] = df["date"].min().strftime("%Y-%m-%d")
+        stats["结束日期"] = df["date"].max().strftime("%Y-%m-%d")
+        return stats
+
+    @property
+    def short_stats(self):
+        """空头收益统计"""
+        df = self.short_daily_return.copy()
+        stats = czsc.daily_performance(df["total"].to_list(), yearly_days=self.yearly_days)
         stats["开始日期"] = df["date"].min().strftime("%Y-%m-%d")
         stats["结束日期"] = df["date"].max().strftime("%Y-%m-%d")
         return stats
@@ -369,6 +356,8 @@ class WeightBacktest:
                 symbol      合约代码，
                 n1b         品种每日收益率，
                 edge        策略每日收益率，
+                long_edge   多头每日收益率，
+                short_edge  空头每日收益率，
                 return      策略每日收益率减去交易成本后的真实收益，
                 cost        交易成本
                 turnover    当日的单边换手率
@@ -390,15 +379,64 @@ class WeightBacktest:
         dfs["edge"] = dfs["weight"] * dfs["n1b"]
         dfs["turnover"] = abs(dfs["weight"].shift(1) - dfs["weight"])
         dfs["cost"] = dfs["turnover"] * self.fee_rate
-        dfs["edge_post_fee"] = dfs["edge"] - dfs["cost"]
+        dfs["return"] = dfs["edge"] - dfs["cost"]
+
+        # 分别计算多头和空头的收益
+        dfs["long_weight"] = np.where(dfs["weight"] > 0, dfs["weight"], 0)
+        dfs["short_weight"] = np.where(dfs["weight"] < 0, dfs["weight"], 0)
+        dfs["long_edge"] = dfs["long_weight"] * dfs["n1b"]
+        dfs["short_edge"] = dfs["short_weight"] * dfs["n1b"]
+
+        dfs["long_turnover"] = abs(dfs["long_weight"].shift(1) - dfs["long_weight"])
+        dfs["short_turnover"] = abs(dfs["short_weight"].shift(1) - dfs["short_weight"])
+        dfs["long_cost"] = dfs["long_turnover"] * self.fee_rate
+        dfs["short_cost"] = dfs["short_turnover"] * self.fee_rate
+
+        dfs["long_return"] = dfs["long_edge"] - dfs["long_cost"]
+        dfs["short_return"] = dfs["short_edge"] - dfs["short_cost"]
+
         daily = (
             dfs.groupby(dfs["dt"].dt.date)
-            .agg({"edge": "sum", "edge_post_fee": "sum", "cost": "sum", "n1b": "sum", "turnover": "sum"})
+            .agg(
+                {
+                    "edge": "sum",
+                    "return": "sum",
+                    "cost": "sum",
+                    "n1b": "sum",
+                    "turnover": "sum",
+                    "long_edge": "sum",
+                    "short_edge": "sum",
+                    "long_cost": "sum",
+                    "short_cost": "sum",
+                    "long_turnover": "sum",
+                    "short_turnover": "sum",
+                    "long_return": "sum",
+                    "short_return": "sum",
+                }
+            )
             .reset_index()
         )
         daily["symbol"] = symbol
-        daily.rename(columns={"edge_post_fee": "return", "dt": "date"}, inplace=True)
-        daily = daily[["date", "symbol", "n1b", "edge", "return", "cost", "turnover"]].copy()
+        daily.rename(columns={"dt": "date"}, inplace=True)
+        cols = [
+            "date",
+            "symbol",
+            "edge",
+            "return",
+            "cost",
+            "n1b",
+            "turnover",
+            "long_edge",
+            "long_cost",
+            "long_return",
+            "long_turnover",
+            "short_edge",
+            "short_cost",
+            "short_return",
+            "short_turnover",
+        ]
+
+        daily = daily[cols].copy()
         return daily
 
     def get_symbol_pairs(self, symbol):
@@ -553,11 +591,22 @@ class WeightBacktest:
 
         dret = pd.concat([v["daily"] for k, v in res.items() if k in symbols], ignore_index=True)
         dret = pd.pivot_table(dret, index="date", columns="symbol", values="return").fillna(0)
-        dret["total"] = dret[list(res.keys())].mean(axis=1)
+
+        if self.weight_type == "ts":
+            # 时序策略每日收益为各品种收益的等权
+            dret["total"] = dret[list(res.keys())].mean(axis=1)
+        elif self.weight_type == "cs":
+            # 截面策略每日收益为各品种收益的和
+            dret["total"] = dret[list(res.keys())].sum(axis=1)
+        else:
+            raise ValueError(f"weight_type {self.weight_type} not supported, should be 'ts' or 'cs'")
+
+        # dret 中的 date 对应的是上一日；date 后移一位，对应的才是当日收益
+        dret = dret.round(4).reset_index()
         res["品种等权日收益"] = dret
 
-        stats = {"开始日期": dret.index.min().strftime("%Y%m%d"), "结束日期": dret.index.max().strftime("%Y%m%d")}
-        stats.update(daily_performance(dret["total"]))
+        stats = {"开始日期": dret["date"].min().strftime("%Y%m%d"), "结束日期": dret["date"].max().strftime("%Y%m%d")}
+        stats.update(daily_performance(dret["total"], yearly_days=self.yearly_days))
         dfp = pd.concat([v["pairs"] for k, v in res.items() if k in symbols], ignore_index=True)
         pairs_stats = evaluate_pairs(dfp)
         pairs_stats = {k: v for k, v in pairs_stats.items() if k in ["单笔收益", "持仓K线数", "交易胜率", "持仓天数"]}
@@ -566,7 +615,15 @@ class WeightBacktest:
         dfw = self.dfw.copy()
         long_rate = dfw[dfw["weight"] > 0].shape[0] / dfw.shape[0]
         short_rate = dfw[dfw["weight"] < 0].shape[0] / dfw.shape[0]
-        stats.update({"多头占比": long_rate, "空头占比": short_rate})
+        stats.update({"多头占比": round(long_rate, 4), "空头占比": round(short_rate, 4)})
+
+        alpha = self.alpha.copy()
+        stats["波动比"] = round(alpha["策略"].std() / alpha["基准"].std(), 4)
+        stats["与基准波动相关性"] = round(alpha["策略"].corr(alpha["基准"].abs()), 4)
+        stats["与基准相关性"] = round(alpha["策略"].corr(alpha["基准"]), 4)
+        alpha_short = alpha[alpha["基准"] < 0].copy()
+        stats["与基准空头相关性"] = round(alpha_short["策略"].corr(alpha_short["基准"]), 4)
+        stats["品种数量"] = len(symbols)
 
         res["绩效评价"] = stats
         return res

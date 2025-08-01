@@ -23,6 +23,7 @@ def cal_break_even_point(seq) -> float:
     return (np.sum(seq < 0) + 1) / len(seq)  # type: ignore
 
 
+@deprecated(reason="用不上了，策略回测统一用 rs_czsc.WeightBacktest 替代，支持扣费")
 def subtract_fee(df, fee=1):
     """依据单品种持仓信号扣除手续费
 
@@ -63,13 +64,14 @@ def subtract_fee(df, fee=1):
     return df
 
 
+@deprecated(reason="请使用 rs_czsc.daily_performance 替代")
 def daily_performance(daily_returns, **kwargs):
     """采用单利计算日收益数据的各项指标
 
     函数计算逻辑：
 
     1. 首先，将传入的日收益率数据转换为NumPy数组，并指定数据类型为float64。
-    2. 然后，进行一系列判断：如果日收益率数据为空或标准差为零或全部为零，则返回一个字典，其中所有指标的值都为零。
+    2. 然后，进行一系列判断：如果日收益率数据为空或标准差为零或全部为零，则返回字典，其中所有指标的值都为零。
     3. 如果日收益率数据满足要求，则进行具体的指标计算：
 
         - 年化收益率 = 日收益率列表的和 / 日收益率列表的长度 * 252
@@ -78,10 +80,11 @@ def daily_performance(daily_returns, **kwargs):
         - 卡玛比率 = 年化收益率 / 最大回撤（如果最大回撤不为零，则除以最大回撤；否则为10）
         - 日胜率 = 大于零的日收益率的个数 / 日收益率的总个数
         - 年化波动率 = 日收益率的标准差 * 标准差的根号252
+        - 下行波动率 = 日收益率中小于零的日收益率的标准差 * 标准差的根号252
         - 非零覆盖 = 非零的日收益率个数 / 日收益率的总个数
         - 回撤风险 = 最大回撤 / 年化波动率；一般认为 1 以下为低风险，1-2 为中风险，2 以上为高风险
 
-    4. 将所有指标的值存储在一个字典中，其中键为指标名称，值为相应的计算结果。
+    4. 将所有指标的值存储在字典中，其中键为指标名称，值为相应的计算结果。
 
     :param daily_returns: 日收益率数据，样例：
         [0.01, 0.02, -0.01, 0.03, 0.02, -0.02, 0.01, -0.01, 0.02, 0.01]
@@ -100,7 +103,10 @@ def daily_performance(daily_returns, **kwargs):
             "最大回撤": 0,
             "卡玛": 0,
             "日胜率": 0,
+            "日盈亏比": 0,
+            "日赢面": 0,
             "年化波动率": 0,
+            "下行波动率": 0,
             "非零覆盖": 0,
             "盈亏平衡点": 0,
             "新高间隔": 0,
@@ -115,8 +121,13 @@ def daily_performance(daily_returns, **kwargs):
     max_drawdown = np.max(dd)
     kama = annual_returns / max_drawdown if max_drawdown != 0 else 10
     win_pct = len(daily_returns[daily_returns >= 0]) / len(daily_returns)
+    daily_mean_loss = np.mean(daily_returns[daily_returns < 0]) if len(daily_returns[daily_returns < 0]) > 0 else 0
+    daily_ykb = np.mean(daily_returns[daily_returns >= 0]) / abs(daily_mean_loss) if daily_mean_loss != 0 else 5
+
     annual_volatility = np.std(daily_returns) * np.sqrt(yearly_days)
     none_zero_cover = len(daily_returns[daily_returns != 0]) / len(daily_returns)
+
+    downside_volatility = np.std(daily_returns[daily_returns < 0]) * np.sqrt(yearly_days)
 
     # 计算最大新高间隔
     max_interval = Counter(np.maximum.accumulate(cum_returns).tolist()).most_common(1)[0][1]
@@ -136,11 +147,14 @@ def daily_performance(daily_returns, **kwargs):
     sta = {
         "绝对收益": round(np.sum(daily_returns), 4),
         "年化": round(annual_returns, 4),
-        "夏普": __min_max(sharpe_ratio, -5, 5, 2),
+        "夏普": __min_max(sharpe_ratio, -5, 10, 2),
         "最大回撤": round(max_drawdown, 4),
-        "卡玛": __min_max(kama, -10, 10, 2),
+        "卡玛": __min_max(kama, -10, 20, 2),
         "日胜率": round(win_pct, 4),
+        "日盈亏比": round(daily_ykb, 4),
+        "日赢面": round(win_pct * daily_ykb - (1 - win_pct), 4),
         "年化波动率": round(annual_volatility, 4),
+        "下行波动率": round(downside_volatility, 4),
         "非零覆盖": round(none_zero_cover, 4),
         "盈亏平衡点": round(cal_break_even_point(daily_returns), 4),
         "新高间隔": max_interval,
@@ -151,9 +165,9 @@ def daily_performance(daily_returns, **kwargs):
 
 
 def rolling_daily_performance(df: pd.DataFrame, ret_col, window=252, min_periods=100, **kwargs):
-    """计算滚动日收益
+    """计算滚动日收益的各项指标
 
-    :param df: pd.DataFrame, 日收益数据，columns=['dt', ret_col]
+    :param df: pd.DataFrame, 日收益数据，columns=['dt', ret_col] 或者 index 为 datetime64[ns]
     :param ret_col: str, 收益列名
     :param window: int, 滚动窗口, 自然天数
     :param min_periods: int, 最小样本数
@@ -161,10 +175,15 @@ def rolling_daily_performance(df: pd.DataFrame, ret_col, window=252, min_periods
 
         - yearly_days: int, 252, 一年的交易日数
     """
+    from czsc.eda import cal_yearly_days
+    from rs_czsc import daily_performance
+
     if not df.index.dtype == "datetime64[ns]":
         df["dt"] = pd.to_datetime(df["dt"])
         df.set_index("dt", inplace=True)
     assert df.index.dtype == "datetime64[ns]", "index必须是datetime64[ns]类型, 请先使用 pd.to_datetime 进行转换"
+
+    yearly_days = kwargs.get("yearly_days", cal_yearly_days(df.index.tolist()))
 
     df = df[[ret_col]].copy().fillna(0)
     df.sort_index(inplace=True, ascending=True)
@@ -173,152 +192,13 @@ def rolling_daily_performance(df: pd.DataFrame, ret_col, window=252, min_periods
     for edt in dts[min_periods:]:
         sdt = edt - pd.Timedelta(days=window)
         dfg = df[(df.index >= sdt) & (df.index <= edt)].copy()
-        s = daily_performance(dfg[ret_col].to_list(), yearly_days=kwargs.get("yearly_days", 252))
+        s = daily_performance(dfg[ret_col].to_list(), yearly_days=yearly_days)
         s["sdt"] = sdt
         s["edt"] = edt
         res.append(s)
 
     dfr = pd.DataFrame(res)
     return dfr
-
-
-@deprecated(version="1.0.0", reason="请使用 daily_performance；调整 yearly_days 参数 52 即可")
-def weekly_performance(weekly_returns):
-    """采用单利计算周收益数据的各项指标
-
-    :param weekly_returns: 周收益率数据，样例：
-        [0.01, 0.02, -0.01, 0.03, 0.02, -0.02, 0.01, -0.01, 0.02, 0.01]
-    :return: dict
-    """
-    weekly_returns = np.array(weekly_returns, dtype=np.float64)
-
-    if len(weekly_returns) == 0 or np.std(weekly_returns) == 0 or all(x == 0 for x in weekly_returns):
-        return {
-            "年化": 0,
-            "夏普": 0,
-            "最大回撤": 0,
-            "卡玛": 0,
-            "周胜率": 0,
-            "年化波动率": 0,
-            "非零覆盖": 0,
-            "盈亏平衡点": 0,
-            "新高间隔": 0,
-            "新高占比": 0,
-        }
-
-    annual_returns = np.sum(weekly_returns) / len(weekly_returns) * 52
-    sharpe_ratio = np.mean(weekly_returns) / np.std(weekly_returns) * np.sqrt(52)
-    cum_returns = np.cumsum(weekly_returns)
-    dd = np.maximum.accumulate(cum_returns) - cum_returns
-    max_drawdown = np.max(dd)
-    kama = annual_returns / max_drawdown if max_drawdown != 0 else 10
-    win_pct = len(weekly_returns[weekly_returns >= 0]) / len(weekly_returns)
-    annual_volatility = np.std(weekly_returns) * np.sqrt(52)
-    none_zero_cover = len(weekly_returns[weekly_returns != 0]) / len(weekly_returns)
-
-    # 计算最大新高间隔
-    high_index = [i for i, x in enumerate(dd) if x == 0]
-    max_interval = 0
-    for i in range(len(high_index) - 1):
-        max_interval = max(max_interval, high_index[i + 1] - high_index[i])
-
-    # 计算新高时间占比
-    high_pct = len(high_index) / len(dd)
-
-    def __min_max(x, min_val, max_val, digits=4):
-        if x < min_val:
-            x1 = min_val
-        elif x > max_val:
-            x1 = max_val
-        else:
-            x1 = x
-        return round(x1, digits)
-
-    sta = {
-        "年化": round(annual_returns, 4),
-        "夏普": __min_max(sharpe_ratio, -5, 5, 2),
-        "最大回撤": round(max_drawdown, 4),
-        "卡玛": __min_max(kama, -10, 10, 2),
-        "周胜率": round(win_pct, 4),
-        "年化波动率": round(annual_volatility, 4),
-        "非零覆盖": round(none_zero_cover, 4),
-        "盈亏平衡点": round(cal_break_even_point(weekly_returns), 4),
-        "新高间隔": max_interval,
-        "时间占比": round(high_pct, 4),
-    }
-    return sta
-
-
-@deprecated(version="1.0.0", reason="请使用 daily_performance；调整 yearly_days 参数 12 即可")
-def net_value_stats(nv: pd.DataFrame, exclude_zero: bool = False, sub_cost=True) -> dict:
-    """统计净值曲线的年化收益、夏普等
-
-    :param nv: 净值数据，格式如下：
-
-                           dt  edge  cost
-        0 2017-01-03 09:30:00   0.0   0.0
-        1 2017-01-03 10:00:00   0.0   0.0
-        2 2017-01-03 10:30:00   0.0   0.0
-        3 2017-01-03 11:00:00   0.0   0.0
-        4 2017-01-03 13:00:00   0.0   0.0
-
-        列说明：
-        dt: 交易时间
-        edge: 单利收益，单位：BP
-        cost: 交易成本，单位：BP；可选列，如果没有成本列，则默认为0
-
-    :param exclude_zero: 是否排除收益为0的情况，一般认为收益为0的情况是没有持仓的
-    :param sub_cost: 是否扣除成本
-    :return:
-    """
-    nv = nv.copy(deep=True)
-    nv["dt"] = pd.to_datetime(nv["dt"])
-
-    if sub_cost:
-        assert "cost" in nv.columns, "成本列cost不存在"
-        nv["edge"] = nv["edge"] - nv["cost"]
-    else:
-        if "cost" not in nv.columns:
-            nv["cost"] = 0
-
-    if exclude_zero:
-        nv = nv[(nv["edge"] != 0) | (nv["cost"] != 0)]
-
-    # 按日期聚合
-    nv["date"] = nv["dt"].apply(lambda x: x.date())
-    df_nav = nv.groupby("date")["edge"].sum() / 10000
-    df_nav = df_nav.cumsum()
-
-    if all(x == 0 for x in nv["edge"]):
-        # 处理没有持仓记录的情况
-        sharp = 0
-        y_ret = 0
-        calmar = 0
-        mdd = 0
-    else:
-        # y_ret = yearly return
-        N = 252
-        y_ret = df_nav.iloc[-1] * (N / len(df_nav))
-        if df_nav.diff().std() != 0:
-            sharp = df_nav.diff().mean() / df_nav.diff().std() * pow(N, 0.5)
-        else:
-            sharp = 0
-        df0 = df_nav.shift(1).ffill().fillna(0)
-        mdd = (1 - (df0 + 1) / (df0 + 1).cummax()).max()
-        calmar = y_ret / mdd if mdd != 0 else 1
-
-    prefix = "有持仓时间" if exclude_zero else ""
-    res = {
-        "夏普": round(sharp, 2),
-        "卡玛": round(calmar, 2),
-        "年化": round(y_ret, 4),
-        "最大回撤": round(mdd, 4),
-    }
-    res = {f"{prefix}{k}": v for k, v in res.items()}
-
-    if not exclude_zero:
-        res["持仓覆盖"] = round(len(nv[(nv["edge"] != 0) | (nv["cost"] != 0)]) / len(nv), 4) if len(nv) > 0 else 0
-    return res
 
 
 def evaluate_pairs(pairs: pd.DataFrame, trade_dir: str = "多空") -> dict:
@@ -429,7 +309,7 @@ def holds_performance(df, **kwargs):
     sdt = df["dt"].min()
     df_turns.loc[(df_turns["date"] == sdt), "change"] = df[df["dt"] == sdt]["weight"].sum()
 
-    df_edge = df.groupby("dt").apply(lambda x: (x["weight"] * x["n1b"]).sum()).reset_index()
+    df_edge = df.groupby("dt")[['weight', 'n1b']].apply(lambda x: (x["weight"] * x["n1b"]).sum()).reset_index()
     df_edge.columns = ["date", "edge_pre_fee"]
     dfr = pd.merge(df_turns, df_edge, on="date", how="left")
     dfr["cost"] = dfr["change"] * fee / 10000  # 换手成本
