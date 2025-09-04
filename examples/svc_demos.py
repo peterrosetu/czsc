@@ -8,13 +8,13 @@
 本示例展示了 czsc.svc.strategy 模块中各种策略分析组件的使用方法。
 
 运行方式:
-streamlit run examples/develop/策略分析组件_svc版本.py
-
-作者: 缠中说禅团队
+streamlit run examples/svc_demos.py
 """
 import sys
 
-sys.path.insert(0, r"A:\ZB\git_repo\waditu\czsc")
+sys.path.insert(0, ".")
+sys.path.insert(0, "..")
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -23,14 +23,12 @@ from loguru import logger
 from czsc.mock import (
     generate_strategy_returns,
     generate_portfolio,
-    generate_weights,
-    generate_price_data,
-    generate_klines,
     generate_klines_with_weights,
+    generate_klines,
 )
 
 # 设置页面配置
-st.set_page_config(page_title="策略分析组件示例", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="SVC组件库样例", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
 
 
 def show_returns_contribution_demo():
@@ -115,7 +113,7 @@ def show_turnover_rate_demo():
     st.markdown("分析策略的换手率变化情况")
 
     # 生成权重数据
-    df_weights = generate_weights()
+    df_weights = generate_klines_with_weights()
 
     # 使用策略分析组件
     from czsc.svc import show_turnover_rate
@@ -167,7 +165,7 @@ def show_symbols_bench_demo():
     st.markdown("分析多个品种的基准收益表现")
 
     # 生成价格数据
-    df_prices = generate_price_data()
+    df_prices = generate_klines_with_weights()
 
     # 使用策略分析组件
     from czsc.svc import show_symbols_bench
@@ -489,7 +487,7 @@ def show_yearly_backtest_demo():
     df_klines_weights = generate_klines_with_weights()
 
     # 使用策略分析组件
-    from czsc.svc import show_yearly_backtest
+    from czsc.svc import show_backtest_by_year
 
     st.subheader("📊 年度回测分析")
 
@@ -506,7 +504,7 @@ def show_yearly_backtest_demo():
         )
 
     st.markdown("#### 📈 年度回测结果")
-    show_yearly_backtest(df_klines_weights, fee_rate=fee_rate, digits=digits, weight_type=weight_type)
+    show_backtest_by_year(df_klines_weights, fee_rate=fee_rate, digits=digits, weight_type=weight_type)
 
     # 添加说明信息
     with st.expander("📋 数据和参数说明", expanded=False):

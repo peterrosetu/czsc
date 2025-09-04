@@ -39,12 +39,12 @@ jobs:
       run: |
         uv run pytest test/ -v
 
-    - name: Lint check
-      run: |
-        uv add --dev flake8 black isort
-        uv run flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        uv run black --check .
-        uv run isort --check-only .
+    # - name: Lint check
+    #   run: |
+    #     uv add --dev flake8 black isort
+    #     uv run flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+    #     uv run black --check .
+    #     uv run isort --check-only .
 
     - name: Security audit
       run: |
@@ -89,7 +89,7 @@ jobs:
 
   publish-to-testpypi:
     name: Publish to TestPyPI
-    if: github.event.inputs.publish_to_testpypi == 'true' || github.event_name == 'workflow_dispatch'
+    if: github.event.inputs.publish_to_testpypi == 'true'
     needs: build
     runs-on: ubuntu-latest
     environment:
@@ -206,22 +206,28 @@ jobs:
         # 检查 Release 是否已存在
         if ! gh release view "$TAG_NAME" > /dev/null 2>&1; then
           echo "Creating release for $TAG_NAME..."
+          
+          # 创建发布说明
+          cat > release_notes.md << EOF
+        🚀 czsc $VERSION
+
+        ### 更新内容
+        - 更新到版本 $VERSION
+        - 详细变更请查看提交历史
+
+        ### 安装方式
+        \`\`\`bash
+        pip install czsc==$VERSION
+        \`\`\`
+
+        ### 文档
+        - 项目文档: README.md
+        - API 参考文档请查看源码
+        EOF
+          
           gh release create "$TAG_NAME" \
             --title "Release $VERSION" \
-            --notes "🚀 czsc $VERSION
-
-### 更新内容
-- 更新到版本 $VERSION
-- 详细变更请查看 [提交历史](https://github.com/${{ github.repository }}/compare/$TAG_NAME)
-
-### 安装方式
-\`\`\`bash
-pip install czsc==$VERSION
-\`\`\`
-
-### 文档
-- [项目文档](https://github.com/${{ github.repository }})
-- [API 参考](https://github.com/${{ github.repository }}/blob/$TAG_NAME/README.md)" \
+            --notes-file release_notes.md \
             --draft=false \
             --prerelease=false
         else

@@ -1,28 +1,13 @@
 # UV 管理开源项目指南
 
 ## 目录
-1. [为什么选择 UV？](#为什么选择-uv)
 2. [安装 UV](#安装-uv)
 3. [项目迁移步骤](#项目迁移步骤)
 4. [依赖管理最佳实践](#依赖管理最佳实践)
 5. [常用命令参考](#常用命令参考)
 6. [发布流程](#发布流程)
 7. [常见问题解决](#常见问题解决)
-
-## 为什么选择 UV？
-
-### 传统方式的痛点
-- **pip + requirements.txt**: 依赖版本不精确，容易出现"在我机器上能跑"的问题
-- **setuptools + setup.py**: 配置繁琐，缺乏现代化的依赖解析
-- **virtualenv 手动管理**: 环境管理复杂，容易出错
-- **构建发布复杂**: 需要多个工具配合
-
-### UV 的优势
-- ⚡ **极速**: 比 pip 快 10-100 倍
-- 🔒 **可重现**: 锁定文件确保环境一致性
-- 🎯 **现代化**: 基于 pyproject.toml 标准
-- 🛠️ **一体化**: 依赖管理、环境管理、构建发布一条龙
-- 🐍 **Python 版本管理**: 内置 Python 版本管理
+8. [UV 启动脚本慢的分析方法](#uv-启动脚本慢的分析方法)
 
 ## 安装 UV
 
@@ -675,14 +660,63 @@ PYTHONPATH = "src"
 DEBUG = "1"
 ```
 
-## 总结
 
-UV 迁移的关键要点：
+## UV 启动脚本慢的分析方法
 
-1. **逐步迁移**: 先完善 pyproject.toml，再逐步替换工作流
-2. **依赖分类**: 合理区分核心依赖和可选依赖
-3. **版本管理**: 使用适当的版本约束策略
-4. **测试验证**: 每个步骤都要验证功能正常
-5. **团队协作**: 更新开发文档，确保团队成员了解新流程
+目标：判断慢在 uv 的环境解析/同步，还是 Python 本身的导入/IO。
 
-通过 UV，您可以享受到现代 Python 包管理的所有优势：更快的安装速度、更可靠的依赖解析、更简洁的配置文件。这将大大提升您的开发效率和项目的可维护性。
+- 1) 基线对比（先看 uv 带来的额外开销）
+```bash
+# 纯 Python
+time python -c "pass"
+
+# uv，不同步环境（只测 uv 调度 + 启动）
+time uv run --no-sync python -c "pass"
+
+# 基准测试（可选）
+hyperfine "python -c 'pass'" "uv run --no-sync python -c 'pass'"
+```
+
+- 2) 排除依赖解析/同步
+```bash
+# 锁定并一次性同步
+uv lock
+uv sync
+
+# 运行时跳过同步
+uv run --no-sync python your_script.py
+
+# 观察是否在做解析/安装
+uv run -vv python your_script.py
+```
+
+- 3) 固定解释器，避免解释器探测耗时
+```bash
+uv run --no-sync --python 3.11 python your_script.py
+```
+
+- 4) 分析 Python 导入开销（多数“启动慢”在这里）
+```bash
+# 打印各模块导入耗时
+uv run --no-sync python -X importtime your_script.py 2> import.log
+# 关注 import.log 顶部最慢的模块，做延迟导入或精简依赖
+```
+
+- 5) 系统层 IO/杀毒排查
+```bash
+# Linux
+strace -f -tt -o trace.log uv run --no-sync python -c "pass"
+
+# macOS（需要 sudo）
+sudo dtruss -t wallclock uv run --no-sync python -c "pass"
+
+# Windows
+# 使用 Process Monitor 观察磁盘/杀毒拦截；将项目/.venv/.uv 加入 Defender 排除
+```
+
+- 6) 常见原因与对策
+  - 首次运行/未锁定导致解析与安装：先 uv lock && uv sync，再 uv run --no-sync
+  - 解释器探测慢：使用 --python 指定版本
+  - 脚本大量/重量级导入：用 -X importtime 找到热点，做延迟导入、移除未用库
+  - 磁盘/杀毒干扰：排除 .venv、.uv、项目目录；避免网络盘，改用本地 SSD
+  - 频繁变更依赖：在 CI/生产使用 uv sync --frozen，开发期尽量减少每次运行触发的同步

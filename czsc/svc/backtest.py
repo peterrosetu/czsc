@@ -8,7 +8,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from loguru import logger
-from .base import safe_import_weight_backtest, safe_import_daily_performance
+
+from .base import safe_import_daily_performance, safe_import_weight_backtest
 
 
 def show_weight_distribution(dfw, abs_weight=True, **kwargs):
@@ -60,9 +61,6 @@ def show_weight_backtest(dfw, **kwargs):
         - n_jobs: int, 并行计算的进程数，默认为 1
     """
     WeightBacktest = safe_import_weight_backtest()
-    if WeightBacktest is None:
-        return
-
     from czsc.eda import cal_yearly_days
 
     fee = kwargs.get("fee", 2)
@@ -277,9 +275,9 @@ def show_backtest_by_thresholds(df: pd.DataFrame, out_sample_sdt, **kwargs):
         - digits: int, 权重保留小数位数，默认 2
         - weight_type: str, 权重类型，默认 'ts'
     """
-    from czsc.svc.strategy import show_multi_backtest
-    from czsc.svc.base import safe_import_weight_backtest
     from czsc.eda import cal_yearly_days
+    from czsc.svc.base import safe_import_weight_backtest
+    from czsc.svc.strategy import show_multi_backtest
 
     # 安全导入 WeightBacktest
     WeightBacktest = safe_import_weight_backtest()
@@ -419,114 +417,168 @@ def show_backtest_by_thresholds(df: pd.DataFrame, out_sample_sdt, **kwargs):
     return wbs
 
 
-def show_yearly_backtest(df: pd.DataFrame, **kwargs):
-    """根据权重数据，按年回测分析绩效
-
-    :param df: pd.DataFrame, columns = ['dt', 'symbol', 'weight', 'price'], 含权重的K线数据
-    :param kwargs: 其他参数
-
-        - fee_rate: float, 交易成本，默认 0.0002
-        - digits: int, 权重保留小数位数，默认 2
-        - weight_type: str, 权重类型，默认 'ts'
-        - min_samples_per_year: int, 每年最少样本数，默认 60
-        - only_complete_years: bool, 是否只展示完整年份，默认 True
+def show_backtest_by_year(df: pd.DataFrame, **kwargs):
     """
-    from czsc.svc.strategy import show_multi_backtest
-    from czsc.svc.base import safe_import_weight_backtest
-    from czsc.eda import cal_yearly_days
-
-    # 安全导入 WeightBacktest
+    按照年份进行回测
+    """
     WeightBacktest = safe_import_weight_backtest()
     if WeightBacktest is None:
-        st.error("无法导入WeightBacktest类，请检查czsc或rs_czsc库的安装")
         return
 
-    # 获取参数
-    fee_rate = kwargs.get("fee_rate", 0.0002)
+    from .strategy import show_multi_backtest
+
+    yearly_days = kwargs.get("yearly_days", 252)
+    digits = kwargs.get("digits", 2)
+    fee_rate = kwargs.get("fee_rate", 0.0)
+    weight_type = kwargs.get("weight_type", "ts")
+
+    df = df[["dt", "symbol", "weight", "price"]].copy()
+    df["year"] = df["dt"].dt.year
+    wbs = {}
+    for year, dfy in df.groupby("year"):
+        dfy = dfy.copy().sort_values(["symbol", "dt"]).reset_index(drop=True)
+        wbs[f"{year}年"] = WeightBacktest(
+            dfy, fee_rate=fee_rate, digits=digits, weight_type=weight_type, yearly_days=yearly_days
+        )
+
+    show_multi_backtest(wbs)
+    return wbs
+
+
+def show_backtest_by_symbol(df: pd.DataFrame, **kwargs):
+    """
+    按照交易标的进行回测
+    """
+    WeightBacktest = safe_import_weight_backtest()
+    if WeightBacktest is None:
+        return
+
+    from .strategy import show_multi_backtest
+
+    digits = kwargs.get("digits", 2)
+    fee_rate = kwargs.get("fee_rate", 0.0)
+    weight_type = kwargs.get("weight_type", "ts")
+    yearly_days = kwargs.get("yearly_days", 252)
+
+    df = df[["dt", "symbol", "weight", "price"]].copy()
+
+    wbs = {}
+    for symbol, dfs in df.groupby("symbol"):
+        dfs = dfs.copy().sort_values(["dt"]).reset_index(drop=True)
+        wbs[symbol] = WeightBacktest(
+            dfs, fee_rate=fee_rate, digits=digits, weight_type=weight_type, yearly_days=yearly_days
+        )
+
+    show_multi_backtest(wbs)
+    return wbs
+
+
+def show_long_short_backtest(df: pd.DataFrame, **kwargs):
+    """
+    分析多头、空头的收益
+    """
+    WeightBacktest = safe_import_weight_backtest()
+    if WeightBacktest is None:
+        return
+
+    from .strategy import show_multi_backtest
+
+    yearly_days = kwargs.get("yearly_days", 252)
+    digits = kwargs.get("digits", 2)
+    fee_rate = kwargs.get("fee_rate", 0.0)
+    weight_type = kwargs.get("weight_type", "ts")
+
+    df = df[["dt", "symbol", "weight", "price"]].copy()
+
+    dfl = df.copy()
+    dfl["weight"] = dfl["weight"].clip(lower=0)
+
+    dfs = df.copy()
+    dfs["weight"] = dfs["weight"].clip(upper=0)
+
+    wbs = {
+        "原始策略": WeightBacktest(
+            df, fee_rate=fee_rate, digits=digits, weight_type=weight_type, yearly_days=yearly_days
+        ),
+        "策略多头": WeightBacktest(
+            dfl, fee_rate=fee_rate, digits=digits, weight_type=weight_type, yearly_days=yearly_days
+        ),
+        "策略空头": WeightBacktest(
+            dfs, fee_rate=fee_rate, digits=digits, weight_type=weight_type, yearly_days=yearly_days
+        ),
+    }
+    show_multi_backtest(wbs)
+    return wbs
+
+
+def show_comprehensive_weight_backtest(df: pd.DataFrame, **kwargs):
+    """综合权重回测可视化展示"""
+    yearly_days = kwargs.get("yearly_days", 252)
+    fee = kwargs.get("fee", 0.0)
     digits = kwargs.get("digits", 2)
     weight_type = kwargs.get("weight_type", "ts")
-    sub_title = kwargs.get("sub_title", "按年度权重回测结果对比")
 
-    # 验证输入数据
-    required_cols = ["dt", "symbol", "weight", "price"]
-    missing_cols = [col for col in required_cols if col not in df.columns]
-    if missing_cols:
-        st.error(f"数据缺少必需的列：{missing_cols}，当前数据列为：{list(df.columns)}")
-        return
+    fee_rate = fee / 10000
 
-    st.subheader(sub_title, divider="rainbow")
-
-    # 数据预处理
-    df = df.copy()
-    df["dt"] = pd.to_datetime(df["dt"])
-    df = df.sort_values(["symbol", "dt"]).reset_index(drop=True)
-
-    # 添加年份列
-    df["year"] = df["dt"].dt.year
-
-    # 计算年化交易日数
-    yearly_days = cal_yearly_days(df["dt"].unique().tolist())
-
-    # 获取所有年份
-    years = sorted(df["year"].unique())
-
-    if len(years) == 0:
-        st.error("数据中没有有效的年份信息")
-        return
-
-    # 显示数据基本信息
-    total_records = len(df)
-    symbol_count = df["symbol"].nunique()
-    weight_stats = df["weight"].describe()
-
-    st.markdown(
-        f"**数据基本信息：** 总记录数 {total_records}，标的数量 {symbol_count}，"
-        f"时间范围 {years[0]}-{years[-1]}，权重均值 {weight_stats['mean']:.4f}，标准差 {weight_stats['std']:.4f}"
-    )
-
-    # 创建不同年份的回测策略
-    wbs = {}
-
-    # 全部数据回测（作为基准）
-    try:
-        wb_all = WeightBacktest(
-            df[["dt", "symbol", "weight", "price"]],
-            fee_rate=fee_rate,
+    tabs = st.tabs(["整体回测", "标的基准", "年度回测", "标的回测", "多空回测", "下载数据"])
+    with tabs[0]:
+        wb = show_weight_backtest(
+            df,
+            fee=fee,
             digits=digits,
-            weight_type=weight_type,
             yearly_days=yearly_days,
+            show_drawdowns=True,
+            show_splited_daily=True,
+            weight_type=weight_type,
         )
-        wbs["全部年份"] = wb_all
-    except Exception as e:
-        st.error(f"全部数据回测失败：{e}")
-        return
+    with tabs[1]:
+        from .symbols import show_symbols_bench
 
-    # 各年份回测
-    for year in years:
-        year_data = df[df["year"] == year].copy()
+        show_symbols_bench(df[["dt", "symbol", "price"]].copy())
 
-        if len(year_data) == 0:
-            logger.warning(f"{year}年数据为空，跳过")
-            continue
+    with tabs[2]:
+        show_backtest_by_year(
+            df, yearly_days=yearly_days, fee_rate=fee_rate, digits=digits, weight_type=weight_type
+        )
 
-        try:
-            wb_year = WeightBacktest(
-                year_data[["dt", "symbol", "weight", "price"]],
-                fee_rate=fee_rate,
-                digits=digits,
-                weight_type=weight_type,
-                yearly_days=yearly_days,
-            )
-            wbs[f"{year}年"] = wb_year
-        except Exception as e:
-            logger.warning(f"{year}年回测失败：{e}")
-            continue
+    with tabs[3]:
+        show_backtest_by_symbol(
+            df, yearly_days=yearly_days, fee_rate=fee_rate, digits=digits, weight_type=weight_type
+        )
 
-    if len(wbs) <= 1:  # 只有全部年份的回测
-        st.error("没有足够的年份数据进行对比分析")
-        return
+    with tabs[4]:
+        show_long_short_backtest(
+            df, yearly_days=yearly_days, fee_rate=fee_rate, digits=digits, weight_type=weight_type
+        )
 
-    # 显示回测结果对比
-    st.caption(f"回测参数：fee_rate={fee_rate}, digits={digits}, weight_type={weight_type}")
-    show_multi_backtest(wbs, show_describe=False)
-    return wbs
+    with tabs[5]:
+        st.download_button(
+            "下载原始数据",
+            data=df.to_csv(index=False),
+            on_click="ignore",
+            file_name="original_weigts_data.csv",
+            mime="text/csv",
+        )
+        st.download_button(
+            "下载策略收益",
+            data=wb.daily_return.to_csv(index=False),
+            on_click="ignore",
+            file_name="strategy_returns.csv",
+            mime="text/csv",
+        )
+        st.download_button(
+            "下载多头收益",
+            data=wb.long_daily_return.to_csv(index=False),
+            on_click="ignore",
+            file_name="long_strategy_returns.csv",
+            mime="text/csv",
+        )
+        st.download_button(
+            "下载空头收益",
+            data=wb.short_daily_return.to_csv(index=False),
+            on_click="ignore",
+            file_name="short_strategy_returns.csv",
+            mime="text/csv",
+        )
+    return wb
+
