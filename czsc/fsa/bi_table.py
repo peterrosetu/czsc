@@ -1,13 +1,14 @@
-# -*- coding: utf-8 -*-
 """
 author: zengbin93
 email: zeng_bin8888@163.com
 create_dt: 2023/06/16 19:45
 describe: 飞书多维表格接口
 """
+
 import os
-import loguru
+
 import pandas as pd
+
 from czsc.fsa.base import FeishuApiBase, request
 
 
@@ -138,8 +139,6 @@ class BiTable(FeishuApiBase):
                     示例值："数据表的新名称"
                     数据校验规则：
                     长度范围：1 字符 ～ 100 字符
-                    正则校验：^[^\[\]\:\\\/\?\*]+$
-
         :return: 返回数据
         """
         params = {}
